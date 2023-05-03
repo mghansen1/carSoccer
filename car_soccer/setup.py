@@ -1,6 +1,6 @@
 from setuptools import setup
 
-package_name = 'carSoccer'
+package_name = 'car_soccer'
 
 setup(
     name=package_name,
