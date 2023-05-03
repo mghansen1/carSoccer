@@ -1,0 +1,29 @@
+running egg_info
+writing ../../build/soccer/soccer.egg-info/PKG-INFO
+writing dependency_links to ../../build/soccer/soccer.egg-info/dependency_links.txt
+writing entry points to ../../build/soccer/soccer.egg-info/entry_points.txt
+writing requirements to ../../build/soccer/soccer.egg-info/requires.txt
+writing top-level names to ../../build/soccer/soccer.egg-info/top_level.txt
+reading manifest file '../../build/soccer/soccer.egg-info/SOURCES.txt'
+writing manifest file '../../build/soccer/soccer.egg-info/SOURCES.txt'
+running build
+running build_py
+copying soccer/soccer.py -> /home/talha/dev/carSoccer/build/soccer/build/lib/soccer
+copying soccer/__init__.py -> /home/talha/dev/carSoccer/build/soccer/build/lib/soccer
+running install
+/usr/lib/python3/dist-packages/setuptools/command/install.py:34: SetuptoolsDeprecationWarning: setup.py install is deprecated. Use build and pip and other standards-based tools.
+  warnings.warn(
+running install_lib
+copying /home/talha/dev/carSoccer/build/soccer/build/lib/soccer/soccer.py -> /home/talha/dev/carSoccer/install/soccer/lib/python3.10/site-packages/soccer
+copying /home/talha/dev/carSoccer/build/soccer/build/lib/soccer/__init__.py -> /home/talha/dev/carSoccer/install/soccer/lib/python3.10/site-packages/soccer
+byte-compiling /home/talha/dev/carSoccer/install/soccer/lib/python3.10/site-packages/soccer/soccer.py to soccer.cpython-310.pyc
+byte-compiling /home/talha/dev/carSoccer/install/soccer/lib/python3.10/site-packages/soccer/__init__.py to __init__.cpython-310.pyc
+running install_data
+copying resource/soccer -> /home/talha/dev/carSoccer/install/soccer/share/ament_index/resource_index/packages
+copying package.xml -> /home/talha/dev/carSoccer/install/soccer/share/soccer
+running install_egg_info
+removing '/home/talha/dev/carSoccer/install/soccer/lib/python3.10/site-packages/soccer-0.0.0-py3.10.egg-info' (and everything under it)
+Copying ../../build/soccer/soccer.egg-info to /home/talha/dev/carSoccer/install/soccer/lib/python3.10/site-packages/soccer-0.0.0-py3.10.egg-info
+running install_scripts
+Installing soccer script to /home/talha/dev/carSoccer/install/soccer/lib/soccer
+writing list of installed files to '/home/talha/dev/carSoccer/build/soccer/install.log'

@@ -1,0 +1,16 @@
+package.xml
+setup.cfg
+setup.py
+../../build/soccer/soccer.egg-info/PKG-INFO
+../../build/soccer/soccer.egg-info/SOURCES.txt
+../../build/soccer/soccer.egg-info/dependency_links.txt
+../../build/soccer/soccer.egg-info/entry_points.txt
+../../build/soccer/soccer.egg-info/requires.txt
+../../build/soccer/soccer.egg-info/top_level.txt
+../../build/soccer/soccer.egg-info/zip-safe
+resource/soccer
+soccer/__init__.py
+soccer/soccer.py
+test/test_copyright.py
+test/test_flake8.py
+test/test_pep257.py
