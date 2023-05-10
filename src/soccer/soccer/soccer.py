@@ -74,11 +74,8 @@ class Soccer(Node):
         yellow_balls = self.detect_balls(img, yellowRange, 20)
         blue_ball = self.find_blue_ball(img)
 
-        # blueRange = (
-        #     (105, 40, 20),
-        #     (140, 255, 200)
-        # )
-        # blue_ball = self.detect_balls(img, blueRange, 30, name="blue_mask")
+        if blue_ball is not None:
+            print(blue_ball.centroid)
 
         # draw a dot on each ball, decreasing in color intensity
         for i, ball in enumerate(yellow_balls):
@@ -86,7 +83,17 @@ class Soccer(Node):
                 img,
                 (int(ball[0]), int(ball[1])),
                 10,
-                (i * 100, 255 - i * 50, 0),
+                (0, 255, 0),
+                -1
+            )
+
+        if blue_ball is not None:
+            x, y = blue_ball.centroid
+            cv2.circle(
+                img,
+                (int(x), int(y)),
+                10,
+                (255, 0, 0),
                 -1
             )
 
@@ -101,8 +108,8 @@ class Soccer(Node):
         mask = cv2.inRange(hsv, lower, upper)
 
         # erode and dilate to remove noise
-        # mask = cv2.erode(mask, None, iterations=2)
-        # mask = cv2.dilate(mask, None, iterations=2)
+        mask = cv2.erode(mask, None, iterations=2)
+        mask = cv2.dilate(mask, None, iterations=2)
 
         self.show_img(mask, name)
 
@@ -172,11 +179,24 @@ class Soccer(Node):
         preds = self.detect_objects(img)
 
         for p in preds:
-            x1, y1, x2, y2 = p.bbox
-            bbox_area = img[x1:x2, y1:y2]
-            print(bbox_area.shape)
+            if "ball" in p.label:
+                x1, y1, x2, y2 = p.bbox
+                bbox_area = img[y1:y2, x1:x2]
+                avg_color = np.mean(bbox_area, axis=(0, 1))[::-1]
+
+                if self.is_blue(avg_color):
+                    return p
 
         return None
+
+    def is_blue(self, rgb):
+        # Convert RGB to HSV color space
+        hsv = cv2.cvtColor(np.uint8([[rgb]]), cv2.COLOR_RGB2HSV)
+        # Define range of dark blue color in HSV
+        lower_blue = (90, 30, 20)
+        upper_blue = (130, 255, 200)
+        # Check if the HSV value is within the range of dark blue color
+        return cv2.inRange(hsv, lower_blue, upper_blue)[0][0] == 255
 
     def show_img(self, img, title=None):
         window_name = title if title else "image"
