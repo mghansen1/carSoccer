@@ -12,16 +12,30 @@ from cv_bridge import CvBridge
 
 from enum import Enum
 
-import super_gradients
-
 from super_gradients.training import models
 from super_gradients.common.object_names import Models
 
 from dataclasses import dataclass
 from typing import Tuple, Optional
 
+from tf2_ros import TransformException
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
+
 
 TIMER_INTERVAL = 0.1
+TF_TIMER_INTERVAL = 0.5
+
+APRILTAG_POSITIONS = {
+    "tag16h5:0": (-0.61, 2),
+    "tag16h5:1": (0, 2.33),
+    "tag16h5:2": (0.61, 2),
+    "tag16h5:3": (1.5, 0),
+    "tag16h5:4": (0.61, -2),
+    "tag16h5:5": (0, -2.33),
+    "tag16h5:6": (-0.61, -2),
+    "tag16h5:7": (-1.5, 0),
+}
 
 
 class MoveState(Enum):
@@ -37,14 +51,11 @@ class Prediction:
 
 class Soccer(Node):
     def __init__(self):
-        super().__init__('soccer')
+        super().__init__("soccer")
         self.bridge = CvBridge()
 
-        self.move_publisher = self.create_publisher(Twist, 'zelda/cmd_vel', 10)
-        self.move_timer = self.create_timer(
-            TIMER_INTERVAL,
-            self.move_timer_callback
-        )
+        self.move_publisher = self.create_publisher(Twist, "zelda/cmd_vel", 10)
+        self.move_timer = self.create_timer(TIMER_INTERVAL, self.move_timer_callback)
 
         self.yolo = models.get(Models.YOLO_NAS_S, pretrained_weights="coco")
         self.label_set = set()
@@ -53,11 +64,25 @@ class Soccer(Node):
 
         self.camera_subscription = self.create_subscription(
             Image,
-            '/camera/color/image_raw',
+            "/camera/color/image_raw",
             self.image_callback,
-            qos.qos_profile_sensor_data
+            qos.qos_profile_sensor_data,
         )
         self.camera_subscription
+
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
+        self.tf_timer = self.create_timer(TF_TIMER_INTERVAL, self.tf_timer_callback)
+
+    def tf_timer_callback(self):
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                "camera_color_optical_frame", "tag16h5:4", rclpy.time.Time()
+            )
+            print(transform.transform.translation)
+        except TransformException as e:
+            print(e)
 
     def move_timer_callback(self):
         pass
@@ -67,35 +92,17 @@ class Soccer(Node):
 
         img = self.bridge.imgmsg_to_cv2(msg, "bgr8")
 
-        yellowRange = (
-            (25, 40, 100),
-            (80, 255, 255)
-        )
+        yellowRange = ((25, 40, 100), (80, 255, 255))
         yellow_balls = self.detect_balls(img, yellowRange, 20)
         blue_ball = self.find_blue_ball(img)
 
-        if blue_ball is not None:
-            print(blue_ball.centroid)
-
         # draw a dot on each ball, decreasing in color intensity
         for i, ball in enumerate(yellow_balls):
-            cv2.circle(
-                img,
-                (int(ball[0]), int(ball[1])),
-                10,
-                (0, 255, 0),
-                -1
-            )
+            cv2.circle(img, (int(ball[0]), int(ball[1])), 10, (0, 255, 0), -1)
 
         if blue_ball is not None:
             x, y = blue_ball.centroid
-            cv2.circle(
-                img,
-                (int(x), int(y)),
-                10,
-                (255, 0, 0),
-                -1
-            )
+            cv2.circle(img, (int(x), int(y)), 10, (255, 0, 0), -1)
 
         self.show_img(img, "Camera")
 
@@ -153,8 +160,7 @@ class Soccer(Node):
                 )
 
                 out_preds.append(
-                    Prediction(bbox=(x1, y1, x2, y2),
-                               label=label, centroid=centroid)
+                    Prediction(bbox=(x1, y1, x2, y2), label=label, centroid=centroid)
                 )
 
                 img = cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 255), 2)
@@ -165,7 +171,7 @@ class Soccer(Node):
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,
                     (255, 255, 255),
-                    2
+                    2,
                 )
 
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
@@ -211,7 +217,7 @@ class Soccer(Node):
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1,
                 (255, 255, 255),
-                2
+                2,
             )
 
         cv2.imshow(window_name, new_img)
@@ -229,5 +235,5 @@ def main(args=None):
     rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
