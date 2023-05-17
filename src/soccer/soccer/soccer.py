@@ -8,14 +8,16 @@ from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry
 from apriltag_msgs.msg import AprilTagDetectionArray
 
+import math
+
 import cv2
 import numpy as np
 from cv_bridge import CvBridge
 
 from enum import Enum
 
-from super_gradients.training import models
-from super_gradients.common.object_names import Models
+# from super_gradients.training import models
+# from super_gradients.common.object_names import Models
 
 from dataclasses import dataclass
 from typing import Tuple, Optional
@@ -25,9 +27,12 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
 
-DO_MOVE = False
+DO_MOVE = True
+# DO_MOVE = False
 TIMER_INTERVAL = 0.1
 TF_TIMER_INTERVAL = 0.5
+MOVE_SPEED = 0.10
+TURN_POWER = 3.0
 IMAGE_DIMS = np.array([320, 240])
 
 APRILTAG_POSITIONS = {
@@ -41,13 +46,23 @@ APRILTAG_POSITIONS = {
     "tag16h5:7": (-1.5, 0),
 }
 
-def prop(error, k, max_power, min_error:float=0):
+
+def y_to_dist(y: float):
+    a = 157.602
+    b = -0.317125
+    c = -155.118
+    dist = a * (y**b) + c
+    return dist / 100.0
+
+
+def prop(error, k, max_power, min_error: float = 0):
     out = np.clip(error * k, -max_power, max_power)
 
     if abs(error) < min_error:
         out = 0.0
 
     return float(out)
+
 
 def to_np(p: Point):
     return np.array([p.x, p.y, p.z])
@@ -76,11 +91,18 @@ def euler_from_quaternion(quaternion: Quaternion):
     cosy_cosp = 1 - 2 * (y * y + z * z)
     yaw = np.arctan2(siny_cosp, cosy_cosp)
 
+    # make sure the angles are in [0, 2*pi]
+    yaw = (yaw + 4 * np.pi) % (2 * np.pi)
+
     return np.array([roll, pitch, yaw])
 
 
 class MoveState(Enum):
     FORWARD = 0
+    TURN_TO_ANGLE = 1
+    STOPPED = 2
+    ALIGN_TO_BALL = 3
+    MOVE_DIST = 4
 
 
 @dataclass
@@ -98,10 +120,11 @@ class Soccer(Node):
         self.move_publisher = self.create_publisher(Twist, "zelda/cmd_vel", 10)
         self.move_timer = self.create_timer(TIMER_INTERVAL, self.move_timer_callback)
 
-        self.yolo = models.get(Models.YOLO_NAS_S, pretrained_weights="coco")
+        # self.yolo = models.get(Models.YOLO_NAS_S, pretrained_weights="coco")
         self.label_set = set()
 
-        self.move_state = MoveState.FORWARD
+        self.move_state = MoveState.ALIGN_TO_BALL
+        self.target_angle = math.radians(90)
         self.turn = 0.0
 
         self.camera_subscription = self.create_subscription(
@@ -113,10 +136,7 @@ class Soccer(Node):
         self.camera_subscription
 
         self.odom_subscription = self.create_subscription(
-            Odometry,
-            '/zelda/odom',
-            self.odom_callback,
-            qos.qos_profile_sensor_data
+            Odometry, "/zelda/odom", self.odom_callback, qos.qos_profile_sensor_data
         )
         self.odom_subscription
 
@@ -142,19 +162,26 @@ class Soccer(Node):
             self.detections.append((d.id, center))
 
     def move_timer_callback(self):
-
         msg = Twist()
 
         match self.move_state:
             case MoveState.FORWARD:
-                print("forward")
-                msg.linear.x = 0.1
+                msg.linear.x = MOVE_SPEED
                 msg.angular.z = self.turn
+            case MoveState.TURN_TO_ANGLE | MoveState.ALIGN_TO_BALL:
+                msg.angular.z = self.turn
+            case MoveState.MOVE_DIST:
+                msg.linear.x = MOVE_SPEED
+            case MoveState.STOPPED:
+                pass
 
-        print(msg)
+        # print(msg)
 
         if DO_MOVE:
             self.move_publisher.publish(msg)
+
+    def turn_timer_callback(self):
+        self.move_state = MoveState.STOPPED
 
     def odom_callback(self, odom: Odometry):
         raw_position = to_np(odom.pose.pose.position)
@@ -169,8 +196,17 @@ class Soccer(Node):
         self.position = raw_position - self.base_position
         self.orientation = raw_orientation - self.base_orientation
 
-        print(f"Position {self.position}")
+        if self.move_state == MoveState.TURN_TO_ANGLE:
+            self.turn = -prop(self.orientation[2] - self.target_angle, 0.15, 0.5)
+            # print(self.orientation[2], self.target_angle)
 
+            if abs(self.orientation[2] - self.target_angle) < math.radians(5):
+                self.move_state = MoveState.MOVE_DIST
+                self.base_position = raw_position
+        elif self.move_state == MoveState.MOVE_DIST:
+            # if the distance from the base position is greater than the target distance
+            if np.linalg.norm(self.position) > self.target_distance:
+                self.move_state = MoveState.STOPPED
 
     def image_callback(self, msg: Image):
         self.get_logger().debug("got frame")
@@ -190,24 +226,40 @@ class Soccer(Node):
         #     x, y = blue_ball.centroid
         #     cv2.circle(img, (int(x), int(y)), 10, (255, 0, 0), -1)
 
-        self.show_img(img, "Camera")
+        self.show_img(img, "Camera", text=str(self.move_state))
 
         cv2.waitKey(1)
 
-
         # CONTROL/PLANNING
 
-        if len(yellow_balls) > 0:
-            yellow_balls = yellow_balls / IMAGE_DIMS # normalize
+        if (
+            self.move_state == MoveState.FORWARD
+            or self.move_state == MoveState.ALIGN_TO_BALL
+        ):
+            if len(yellow_balls) > 0:
+                yellow_balls = yellow_balls / IMAGE_DIMS  # normalize
 
-            # seek largest ball
-            target = yellow_balls[0]
-            x_error = 0.5 - target[0]
+                dribbling = yellow_balls[yellow_balls[:, 1] > 0.8]
 
-            self.turn = prop(x_error, 1.0, 0.1, min_error=0.03)
-            print(self.detections)
-        else:
-            self.turn = 0.0
+                if len(dribbling) > 0:
+                    target = dribbling[0]
+                else:
+                    # seek largest ball
+                    target = yellow_balls[0]
+
+                x_error = 0.5 - target[0]
+
+                self.turn = prop(x_error, TURN_POWER, 0.5, min_error=0.03)
+
+                if self.move_state == MoveState.ALIGN_TO_BALL and abs(x_error) < 0.03:
+                    self.move_state = MoveState.MOVE_DIST
+                    self.target_distance = y_to_dist(target[1])
+                    self.target_angle = math.radians(90)
+                    print(
+                        f"Moving to angle {self.target_angle} then distance {self.target_distance}"
+                    )
+            else:
+                self.turn = 0.0
 
     def detect_balls(self, img, colorRange, area_min, name="mask") -> np.ndarray:
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -278,8 +330,6 @@ class Soccer(Node):
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         self.show_img(img, "Objects")
 
-        print(self.label_set)
-
         return out_preds
 
     def find_blue_ball(self, img) -> Optional[Prediction]:
@@ -305,7 +355,7 @@ class Soccer(Node):
         # Check if the HSV value is within the range of dark blue color
         return cv2.inRange(hsv, lower_blue, upper_blue)[0][0] == 255
 
-    def show_img(self, img, title=None):
+    def show_img(self, img, title=None, text=None):
         window_name = title if title else "image"
         new_img = img.copy()
 
@@ -315,6 +365,17 @@ class Soccer(Node):
                 new_img,
                 title,
                 (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (255, 255, 255),
+                2,
+            )
+
+        if text:
+            cv2.putText(
+                new_img,
+                text,
+                (10, 60),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1,
                 (255, 255, 255),
