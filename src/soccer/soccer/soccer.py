@@ -9,6 +9,7 @@ from nav_msgs.msg import Odometry
 from apriltag_msgs.msg import AprilTagDetectionArray
 
 import math
+from collections import deque
 
 import cv2
 import numpy as np
@@ -27,11 +28,11 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
 
-DO_MOVE = True
-# DO_MOVE = False
+# DO_MOVE = True
+DO_MOVE = False
 TIMER_INTERVAL = 0.1
 TF_TIMER_INTERVAL = 0.5
-MOVE_SPEED = 0.10
+MOVE_SPEED = 0.25
 TURN_POWER = 3.0
 IMAGE_DIMS = np.array([320, 240])
 
@@ -96,6 +97,16 @@ def euler_from_quaternion(quaternion: Quaternion):
 
     return np.array([roll, pitch, yaw])
 
+def rotate_about_origin(point: np.ndarray, angle: float) -> np.ndarray:
+    rot = np.array([
+        [math.cos(angle), -math.sin(angle)],
+        [math.sin(angle), math.cos(angle)]
+    ])
+
+    rotated = rot @ point[:2]
+
+    return np.array([rotated[0], rotated[1], point[2]])
+
 
 class MoveState(Enum):
     FORWARD = 0
@@ -111,9 +122,9 @@ class Prediction:
     centroid: Tuple[int]
     label: str
 
-
 class Soccer(Node):
     def __init__(self):
+
         super().__init__("soccer")
         self.bridge = CvBridge()
 
@@ -123,9 +134,11 @@ class Soccer(Node):
         # self.yolo = models.get(Models.YOLO_NAS_S, pretrained_weights="coco")
         self.label_set = set()
 
-        self.move_state = MoveState.ALIGN_TO_BALL
+        self.move_state = MoveState.MOVE_DIST
         self.target_angle = math.radians(90)
+
         self.turn = 0.0
+        self.forward = 0.2
 
         self.camera_subscription = self.create_subscription(
             Image,
@@ -153,6 +166,7 @@ class Soccer(Node):
         )
 
         self.detections: list[tuple[int, np.ndarray]] = []
+        self.plan: Optional[deque[tuple[MoveState, tuple]]] = deque()
 
     def apriltag_callback(self, msg: AprilTagDetectionArray):
         self.detections = []
@@ -171,7 +185,7 @@ class Soccer(Node):
             case MoveState.TURN_TO_ANGLE | MoveState.ALIGN_TO_BALL:
                 msg.angular.z = self.turn
             case MoveState.MOVE_DIST:
-                msg.linear.x = MOVE_SPEED
+                msg.linear.x = self.forward
             case MoveState.STOPPED:
                 pass
 
@@ -193,20 +207,40 @@ class Soccer(Node):
         if self.base_orientation is None:
             self.base_orientation = raw_orientation
 
-        self.position = raw_position - self.base_position
+        self.position = rotate_about_origin(raw_position - self.base_position, -self.base_orientation[2])
         self.orientation = raw_orientation - self.base_orientation
 
-        if self.move_state == MoveState.TURN_TO_ANGLE:
-            self.turn = -prop(self.orientation[2] - self.target_angle, 0.15, 0.5)
-            # print(self.orientation[2], self.target_angle)
+        print(self.position, self.orientation)
 
-            if abs(self.orientation[2] - self.target_angle) < math.radians(5):
-                self.move_state = MoveState.MOVE_DIST
-                self.base_position = raw_position
-        elif self.move_state == MoveState.MOVE_DIST:
-            # if the distance from the base position is greater than the target distance
-            if np.linalg.norm(self.position) > self.target_distance:
-                self.move_state = MoveState.STOPPED
+        if len(self.plan) > 0:
+            state, params = self.plan[0]
+            print(state, params)
+            self.move_state = state
+
+            done = False
+
+            match state:
+                case MoveState.MOVE_DIST:
+                    target_dist, speed = params
+                    self.forward = speed
+
+                    if np.linalg.norm(self.position) > target_dist:
+                        done = True
+                case MoveState.TURN_TO_ANGLE:
+                    target_angle, power = params
+                    self.turn = -prop(self.orientation[2] - target_angle, power, 0.5)
+
+                    if abs(self.orientation[2] - target_angle) < math.radians(5):
+                        done = True
+                case MoveState.FORWARD:
+                    pass
+
+            if done:
+                self.plan.popleft()
+
+                if len(self.plan) == 0:
+                    self.move_state = MoveState.ALIGN_TO_BALL
+                    self.base_position = raw_position
 
     def image_callback(self, msg: Image):
         self.get_logger().debug("got frame")
@@ -232,6 +266,9 @@ class Soccer(Node):
 
         # CONTROL/PLANNING
 
+        if self.position is None:
+            return
+
         if (
             self.move_state == MoveState.FORWARD
             or self.move_state == MoveState.ALIGN_TO_BALL
@@ -252,12 +289,18 @@ class Soccer(Node):
                 self.turn = prop(x_error, TURN_POWER, 0.5, min_error=0.03)
 
                 if self.move_state == MoveState.ALIGN_TO_BALL and abs(x_error) < 0.03:
-                    self.move_state = MoveState.MOVE_DIST
-                    self.target_distance = y_to_dist(target[1])
-                    self.target_angle = math.radians(90)
-                    print(
-                        f"Moving to angle {self.target_angle} then distance {self.target_distance}"
-                    )
+                    ball_distance = y_to_dist(target[1])
+
+                    perp_distance = abs(math.sin(self.orientation[2]) * ball_distance)
+                    parallel_distance = abs(math.cos(self.orientation[2]) * ball_distance)
+
+                    self.plan = deque([
+                        (MoveState.TURN_TO_ANGLE, (math.radians(90), 5.0)),
+                        (MoveState.MOVE_DIST, (perp_distance, 0.1)),
+                        (MoveState.TURN_TO_ANGLE, (math.radians(0), 5.0)),
+                        (MoveState.FORWARD, ()),
+                    ])
+                    print(self.plan)
             else:
                 self.turn = 0.0
 
