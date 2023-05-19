@@ -1,6 +1,6 @@
 from setuptools import setup
 
-package_name = 'soccer'
+package_name = 'zelda_py_soccer'
 
 setup(
     name=package_name,
@@ -20,7 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'soccer = soccer.soccer:main'
+            'zelda_py_soccer = zelda_py_soccer.zelda_py_soccer:main'
         ],
     },
 )

@@ -17,8 +17,8 @@ from cv_bridge import CvBridge
 
 from enum import Enum
 
-# from super_gradients.training import models
-# from super_gradients.common.object_names import Models
+from super_gradients.training import models
+from super_gradients.common.object_names import Models
 
 from dataclasses import dataclass
 from typing import Tuple, Optional
@@ -28,12 +28,12 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
 
-# DO_MOVE = True
-DO_MOVE = False
+# DO_MOVE = False
+DO_MOVE = True
 TIMER_INTERVAL = 0.1
 TF_TIMER_INTERVAL = 0.5
 MOVE_SPEED = 0.25
-TURN_POWER = 3.0
+TURN_POWER = 1.5
 IMAGE_DIMS = np.array([320, 240])
 
 APRILTAG_POSITIONS = {
@@ -110,11 +110,19 @@ def rotate_about_origin(point: np.ndarray, angle: float) -> np.ndarray:
 
 class MoveState(Enum):
     FORWARD = 0
-    TURN_TO_ANGLE = 1
-    STOPPED = 2
-    ALIGN_TO_BALL = 3
-    MOVE_DIST = 4
+    STOPPED = 1
+    ALIGN_TO_BALL = 2
+    NAV_TO_POINT = 3
+    ALIGN_TO_APRILTAG = 4
 
+class NavPlanStep(Enum):
+    TURN = 0
+    FORWARD = 1
+
+@dataclass
+class Pose:
+    position: np.ndarray
+    rotation: float
 
 @dataclass
 class Prediction:
@@ -122,23 +130,29 @@ class Prediction:
     centroid: Tuple[int]
     label: str
 
+ROBOT_NAME = "yoshi"
+
 class Soccer(Node):
     def __init__(self):
 
-        super().__init__("soccer")
+        super().__init__("zelda_py_soccer")
         self.bridge = CvBridge()
 
-        self.move_publisher = self.create_publisher(Twist, "zelda/cmd_vel", 10)
+        self.move_publisher = self.create_publisher(Twist, f"{ROBOT_NAME}/cmd_vel", 10)
         self.move_timer = self.create_timer(TIMER_INTERVAL, self.move_timer_callback)
 
-        # self.yolo = models.get(Models.YOLO_NAS_S, pretrained_weights="coco")
+        self.yolo = models.get(Models.YOLO_NAS_S, pretrained_weights="coco")
         self.label_set = set()
 
-        self.move_state = MoveState.MOVE_DIST
-        self.target_angle = math.radians(90)
+        self.move_state = MoveState.NAV_TO_POINT
 
+        self.forward = 0.0
         self.turn = 0.0
-        self.forward = 0.2
+
+        self.plan: deque[Pose] = deque([
+            Pose(np.array([-1.0, -1.0, 0.0]), math.radians(0.0)),
+            Pose(np.array([0.5, -0.7, 0.0]), math.radians(30.0)),
+        ])
 
         self.camera_subscription = self.create_subscription(
             Image,
@@ -149,7 +163,7 @@ class Soccer(Node):
         self.camera_subscription
 
         self.odom_subscription = self.create_subscription(
-            Odometry, "/zelda/odom", self.odom_callback, qos.qos_profile_sensor_data
+            Odometry, f"/{ROBOT_NAME}/odom", self.odom_callback, qos.qos_profile_sensor_data
         )
         self.odom_subscription
 
@@ -158,6 +172,9 @@ class Soccer(Node):
         self.position = None
         self.orientation = None
 
+        self.nav_start_position = None
+        self.nav_start_orientation = None
+
         self.apriltag_subscription = self.create_subscription(
             AprilTagDetectionArray,
             "/detections",
@@ -165,29 +182,44 @@ class Soccer(Node):
             qos.qos_profile_sensor_data,
         )
 
-        self.detections: list[tuple[int, np.ndarray]] = []
-        self.plan: Optional[deque[tuple[MoveState, tuple]]] = deque()
+        self.detections = {}
 
-    def apriltag_callback(self, msg: AprilTagDetectionArray):
-        self.detections = []
+        self.nav_plan = None
+
+    def apriltag_callback(self, msg):
+        self.detections = {}
 
         for d in msg.detections:
             center = np.array([d.centre.x, d.centre.y]) / IMAGE_DIMS
-            self.detections.append((d.id, center))
+            self.detections[d.id] = center
+
+        if self.move_state == MoveState.ALIGN_TO_APRILTAG:
+            if 1 in self.detections:
+                print("ALIGNING TO APRIL TAG")
+                pos = self.detections[1]
+
+                x_error = 0.5 - pos[0]
+                self.turn = prop(x_error, 0.8, 0.3)
+
+                if abs(x_error) < 0.05:
+                    self.move_state = MoveState.STOPPED
+            else:
+                self.turn = 0.05
 
     def move_timer_callback(self):
         msg = Twist()
 
+
         match self.move_state:
             case MoveState.FORWARD:
-                msg.linear.x = MOVE_SPEED
-                msg.angular.z = self.turn
-            case MoveState.TURN_TO_ANGLE | MoveState.ALIGN_TO_BALL:
-                msg.angular.z = self.turn
-            case MoveState.MOVE_DIST:
-                msg.linear.x = self.forward
+                pass
             case MoveState.STOPPED:
                 pass
+            case MoveState.ALIGN_TO_BALL | MoveState.ALIGN_TO_APRILTAG:
+                msg.angular.z = self.turn
+            case MoveState.NAV_TO_POINT:
+                msg.linear.x = self.forward
+                msg.angular.z = self.turn
 
         # print(msg)
 
@@ -207,40 +239,63 @@ class Soccer(Node):
         if self.base_orientation is None:
             self.base_orientation = raw_orientation
 
-        self.position = rotate_about_origin(raw_position - self.base_position, -self.base_orientation[2])
+        self.position = rotate_about_origin(raw_position - self.base_position, -self.base_orientation[2]) + np.array([-2.0, 0.0, 0.0])
         self.orientation = raw_orientation - self.base_orientation
 
-        print(self.position, self.orientation)
 
-        if len(self.plan) > 0:
-            state, params = self.plan[0]
-            print(state, params)
-            self.move_state = state
+        if self.move_state == MoveState.NAV_TO_POINT:
+            goal = self.plan[0]
 
+            if self.nav_plan is None:
+                # create a nav plan
+                # first, rotate towards target position
+                first_angle = math.atan2(goal.position[1] - self.position[1], goal.position[0] - self.position[0])
+
+                # next, move forward until we reach the target position
+                distance = np.linalg.norm(goal.position[:2] - self.position[:2])
+
+                # finally, rotate towards the target orientation
+                second_angle = goal.rotation
+
+                self.nav_plan = deque([
+                    (NavPlanStep.TURN, first_angle),
+                    (NavPlanStep.FORWARD, distance),
+                    (NavPlanStep.TURN, second_angle)
+                ])
+
+                self.nav_start_position = self.position
+                self.nav_start_orientation = self.orientation
+
+            if len(self.nav_plan) == 0:
+                self.nav_plan = None
+                self.plan.popleft()
+                return
+            
+            step = self.nav_plan[0]
+            kind, value = step
             done = False
 
-            match state:
-                case MoveState.MOVE_DIST:
-                    target_dist, speed = params
-                    self.forward = speed
+            print(f"nav plan step: {kind}, {value}")
 
-                    if np.linalg.norm(self.position) > target_dist:
-                        done = True
-                case MoveState.TURN_TO_ANGLE:
-                    target_angle, power = params
-                    self.turn = -prop(self.orientation[2] - target_angle, power, 0.5)
+            if kind == NavPlanStep.TURN:
+                self.forward = 0.0
+                self.turn = -prop(self.orientation[2] - value, 1.5, 1.0)
 
-                    if abs(self.orientation[2] - target_angle) < math.radians(5):
-                        done = True
-                case MoveState.FORWARD:
-                    pass
+                if abs(self.orientation[2] - value) < math.radians(5):
+                    done = True
+
+            elif kind == NavPlanStep.FORWARD:
+                dist = np.linalg.norm(self.position[:2] - self.nav_start_position[:2])
+                self.forward = prop(value - dist, 0.9, 0.13)
+                self.turn = 0.0
+
+                if dist > value:
+                    done = True
 
             if done:
-                self.plan.popleft()
+                self.nav_plan.popleft()
 
-                if len(self.plan) == 0:
-                    self.move_state = MoveState.ALIGN_TO_BALL
-                    self.base_position = raw_position
+        print(self.position, self.orientation)
 
     def image_callback(self, msg: Image):
         self.get_logger().debug("got frame")
@@ -250,23 +305,28 @@ class Soccer(Node):
         img = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         yellowRange = ((25, 40, 100), (80, 255, 255))
         yellow_balls = self.detect_balls(img, yellowRange, 20)
-        # blue_ball = self.find_blue_ball(img)
+        blue_ball = self.find_blue_ball(img)
 
         # draw a dot on each ball, decreasing in color intensity
-        for i, ball in enumerate(yellow_balls):
-            cv2.circle(img, (int(ball[0]), int(ball[1])), 10, (0, 255, 0), -1)
+        # for i, ball in enumerate(yellow_balls):
+        #     cv2.circle(img, (int(ball[0]), int(ball[1])), 10, (0, 255, 0), -1)
 
         # if blue_ball is not None:
         #     x, y = blue_ball.centroid
         #     cv2.circle(img, (int(x), int(y)), 10, (255, 0, 0), -1)
 
-        self.show_img(img, "Camera", text=str(self.move_state))
+        print(self.detections)
+        for detection in self.detections.values():
+            x, y = detection * IMAGE_DIMS
+            cv2.circle(img, (int(x), int(y)), 10, (0, 0, 255), -1)
+
+        self.show_img(img, "Camera")
 
         cv2.waitKey(1)
 
         # CONTROL/PLANNING
 
-        if self.position is None:
+        if self.position is None or self.orientation is None:
             return
 
         if (
@@ -276,31 +336,13 @@ class Soccer(Node):
             if len(yellow_balls) > 0:
                 yellow_balls = yellow_balls / IMAGE_DIMS  # normalize
 
-                dribbling = yellow_balls[yellow_balls[:, 1] > 0.8]
-
-                if len(dribbling) > 0:
-                    target = dribbling[0]
-                else:
-                    # seek largest ball
-                    target = yellow_balls[0]
-
+                target = yellow_balls[0]
                 x_error = 0.5 - target[0]
+                self.turn = prop(x_error, 0.8, 0.3)
 
-                self.turn = prop(x_error, TURN_POWER, 0.5, min_error=0.03)
-
-                if self.move_state == MoveState.ALIGN_TO_BALL and abs(x_error) < 0.03:
-                    ball_distance = y_to_dist(target[1])
-
-                    perp_distance = abs(math.sin(self.orientation[2]) * ball_distance)
-                    parallel_distance = abs(math.cos(self.orientation[2]) * ball_distance)
-
-                    self.plan = deque([
-                        (MoveState.TURN_TO_ANGLE, (math.radians(90), 5.0)),
-                        (MoveState.MOVE_DIST, (perp_distance, 0.1)),
-                        (MoveState.TURN_TO_ANGLE, (math.radians(0), 5.0)),
-                        (MoveState.FORWARD, ()),
-                    ])
-                    print(self.plan)
+                if abs(x_error) < 0.05:
+                    self.move_state = MoveState.ALIGN_TO_APRILTAG
+                    self.ball_angle = self.orientation[2]
             else:
                 self.turn = 0.0
 
